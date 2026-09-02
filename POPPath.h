@@ -5,23 +5,19 @@
 
 #import <Foundation/Foundation.h>
 
-#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-#import <roothide.h>
-#elif defined(POP_PACKAGE_SCHEME_ROOTLESS)
-#import <rootless.h>
-#endif
-
 NS_ASSUME_NONNULL_BEGIN
 
-/// Resolves a canonical rootful path for the jailbreak scheme used to build this binary.
+/// Resolves a canonical rootful path inside the standard /var/jb rootless.
 NS_INLINE NSString *POPPath(NSString *path) {
-#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
-    return jbroot(path);
-#elif defined(POP_PACKAGE_SCHEME_ROOTLESS)
-    return ROOT_PATH_NS(path);
-#else
-    return path;
+#if defined(POP_PACKAGE_SCHEME_ROOTLESS)
+    if ([path hasPrefix:@"/var/jb/"] || [path isEqualToString:@"/var/jb"]) {
+        return path;
+    }
+    if ([path hasPrefix:@"/"]) {
+        return [@"/var/jb" stringByAppendingString:path];
+    }
 #endif
+    return path;
 }
 
 NS_ASSUME_NONNULL_END

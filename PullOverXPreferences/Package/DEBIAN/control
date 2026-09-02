@@ -7,7 +7,7 @@ Depends: firmware (>= 5.0), mobilesubstrate, preferenceloader
 Conflicts: 
 Replaces: 
 Priority: optional
-Architecture: iphoneos-arm
+Architecture: iphoneos-arm64
 Author: mlgm
 dev: 
 Homepage: 

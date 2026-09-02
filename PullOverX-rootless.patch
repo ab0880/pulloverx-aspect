@@ -1,0 +1,638 @@
+From 418ea36114d6e3cd17fd06ff6fb1451a33262c89 Mon Sep 17 00:00:00 2001
+From: Minis <minis@localhost>
+Date: Wed, 2 Sep 2026 19:04:45 +0800
+Subject: [PATCH] Convert project to standard rootless GitHub Actions build
+
+---
+ .github/workflows/build.yml                 | 59 ++++++++---------
+ POPPath.h                                   | 22 +++----
+ PullOverX.xcconfig                          | 33 +++-------
+ PullOverX/POApplicationHelper.m             |  2 +-
+ PullOverX/PullOverX.mm                      |  2 -
+ PullOverXPreferences/Package/DEBIAN/control |  2 +-
+ README.md                                   | 70 +++++++++++++++++++--
+ build.sh                                    | 64 +++++--------------
+ libsubstrate-roothide.tbd                   | 19 ------
+ roothide-devkit/SOURCE.md                   | 10 ---
+ roothide-devkit/roothide.h                  |  7 ---
+ roothide-devkit/roothide/libroothide.tbd    | 19 ------
+ roothide-devkit/roothide/module.modulemap   |  7 ---
+ roothide-devkit/roothide/roothide.h         | 52 ---------------
+ roothide-devkit/roothide/stub.h             | 50 ---------------
+ 15 files changed, 126 insertions(+), 292 deletions(-)
+ delete mode 100644 libsubstrate-roothide.tbd
+ delete mode 100644 roothide-devkit/SOURCE.md
+ delete mode 100644 roothide-devkit/roothide.h
+ delete mode 100644 roothide-devkit/roothide/libroothide.tbd
+ delete mode 100644 roothide-devkit/roothide/module.modulemap
+ delete mode 100644 roothide-devkit/roothide/roothide.h
+ delete mode 100644 roothide-devkit/roothide/stub.h
+
+diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
+index f7ecce6..326d84b 100644
+--- a/.github/workflows/build.yml
++++ b/.github/workflows/build.yml
+@@ -1,4 +1,4 @@
+-name: Build PullOver X (roothide)
++name: Build PullOver X (rootless)
+ 
+ on:
+   push:
+@@ -12,52 +12,43 @@ jobs:
+       - name: Checkout
+         uses: actions/checkout@v4
+ 
+-      - name: Install Theos (at /opt/theos as xcconfig expects)
+-        run: |
+-          brew install ldid
+-          # 仓库 xcconfig 写死 THEOS=/opt/theos，直接装到那里
+-          sudo mkdir -p /opt
+-          sudo git clone --recursive https://github.com/theos/theos.git /opt/theos
+-          # rootless/roothide SDK
+-          curl -sL https://github.com/theos/sdks/archive/master.tar.gz | tar -xz -C /tmp
+-          sudo cp -r /tmp/sdks-master/*.sdk /opt/theos/sdks/ 2>/dev/null || true
+-          ls /opt/theos/sdks/ | head -5
+-          echo "THEOS=/opt/theos" >> $GITHUB_ENV
+-
+-      - name: Patch theos for roothide substrate
+-        run: |
+-          sudo mkdir -p /opt/theos/vendor/lib/iphone/roothide
+-          sudo cp libsubstrate-roothide.tbd /opt/theos/vendor/lib/iphone/roothide/libsubstrate.tbd
+-
+       - name: Select Xcode
+         run: |
+-          ls /Applications/ | grep Xcode
+-          # 用 runner 上最新的 Xcode(arm64e 支持完整)
+-          XCODE_PATH=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+-          echo "Using $XCODE_PATH"
++          XCODE_PATH=$(find /Applications -maxdepth 1 -name 'Xcode*.app' -print | sort | tail -1)
++          test -n "$XCODE_PATH"
+           sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
+           xcodebuild -version
+           xcodebuild -showsdks | grep -i iphoneos
+ 
+-      - name: Install dpkg-deb
++      - name: Install build tools
+         run: |
+-          brew install dpkg
+-          echo "$(brew --prefix)/bin" >> $GITHUB_PATH
++          brew install ldid dpkg
++          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+ 
+-      - name: Build (roothide)
++      - name: Install Theos and iOS SDK
++        run: |
++          sudo git clone --recursive https://github.com/theos/theos.git /opt/theos
++          sudo chown -R "$USER":staff /opt/theos
++          curl -fsSL https://github.com/theos/sdks/archive/master.tar.gz | tar -xz -C /tmp
++          cp -R /tmp/sdks-master/*.sdk /opt/theos/sdks/
++          test -d /opt/theos/sdks
++          find /opt/theos -name 'libsubstrate.tbd' -print
++          echo "THEOS=/opt/theos" >> "$GITHUB_ENV"
++
++      - name: Build rootless package
+         run: |
+           chmod +x build.sh
+-          ./build.sh roothide release
++          ./build.sh rootless release
+ 
+-      - name: Collect artifact
++      - name: Verify package layout
+         run: |
+-          mkdir -p output
+-          find . -name "*.deb" -path "*packages*" -exec cp {} output/ \;
+-          ls -la output/
++          test -n "$(find packages -name '*.deb' -print -quit)"
++          dpkg-deb -I packages/*.deb
++          dpkg-deb -c packages/*.deb | grep -E '/var/jb/(Library/MobileSubstrate|Library/PreferenceBundles|Library/PreferenceLoader)'
+ 
+-      - name: Upload .deb
++      - name: Upload rootless .deb
+         uses: actions/upload-artifact@v4
+         with:
+-          name: pulloverx-roothide-deb
+-          path: output/*.deb
++          name: pulloverx-rootless-deb
++          path: packages/*.deb
+           if-no-files-found: error
+diff --git a/POPPath.h b/POPPath.h
+index b3d4258..f7fc63c 100644
+--- a/POPPath.h
++++ b/POPPath.h
+@@ -5,23 +5,19 @@
+ 
+ #import <Foundation/Foundation.h>
+ 
+-#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+-#import <roothide.h>
+-#elif defined(POP_PACKAGE_SCHEME_ROOTLESS)
+-#import <rootless.h>
+-#endif
+-
+ NS_ASSUME_NONNULL_BEGIN
+ 
+-/// Resolves a canonical rootful path for the jailbreak scheme used to build this binary.
++/// Resolves a canonical rootful path inside the standard /var/jb rootless.
+ NS_INLINE NSString *POPPath(NSString *path) {
+-#if defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+-    return jbroot(path);
+-#elif defined(POP_PACKAGE_SCHEME_ROOTLESS)
+-    return ROOT_PATH_NS(path);
+-#else
+-    return path;
++#if defined(POP_PACKAGE_SCHEME_ROOTLESS)
++    if ([path hasPrefix:@"/var/jb/"] || [path isEqualToString:@"/var/jb"]) {
++        return path;
++    }
++    if ([path hasPrefix:@"/"]) {
++        return [@"/var/jb" stringByAppendingString:path];
++    }
+ #endif
++    return path;
+ }
+ 
+ NS_ASSUME_NONNULL_END
+diff --git a/PullOverX.xcconfig b/PullOverX.xcconfig
+index 8a60f1f..5942723 100644
+--- a/PullOverX.xcconfig
++++ b/PullOverX.xcconfig
+@@ -1,19 +1,14 @@
+-// PullOverX 共享构建配置。
+-// 方案选择（roothide、rootless、rootful）由 build.sh 控制，
+-// 它会覆盖 POP_SCHEME、链接选项和 GCC_PREPROCESSOR_DEFINITIONS。
+-
+ THEOS = /opt/theos
+-DEVKIT = $(SRCROOT)/roothide-devkit
+ 
+-// 默认方案；build.sh 会通过 xcodebuild 命令行覆盖。
+-POP_SCHEME = roothide
+-POP_ROOTHIDE_LDFLAGS = -lroothide
++// This fork targets standard rootless jailbreaks (Dopamine/Fugu15-style).
++POP_SCHEME = rootless
++POP_ROOTHIDE_LDFLAGS =
+ POP_ROOTLESS_LDFLAGS =
+ 
+ SDKROOT = iphoneos
+ TARGETED_DEVICE_FAMILY = 1,2
+ IPHONEOS_DEPLOYMENT_TARGET = 14.0
+-ARCHS = arm64e
++ARCHS = arm64 arm64e
+ VALID_ARCHS = arm64 arm64e
+ ONLY_ACTIVE_ARCH = NO
+ ENABLE_BITCODE = NO
+@@ -24,7 +19,7 @@ VERSIONING_SYSTEM = apple-generic
+ DYLIB_COMPATIBILITY_VERSION = 1
+ DYLIB_CURRENT_VERSION = 1
+ 
+-// Tweak 与偏好设置包均为注入式库，不需要签名证书。
++// Injected binaries are ad-hoc signed by ldid in the workflow.
+ CODE_SIGN_IDENTITY =
+ CODE_SIGN_IDENTITY[sdk=iphoneos*] =
+ CODE_SIGNING_REQUIRED = NO
+@@ -34,24 +29,16 @@ DEVELOPMENT_TEAM =
+ PROVISIONING_PROFILE_SPECIFIER =
+ AD_HOC_CODE_SIGNING_ALLOWED = YES
+ 
+-// 头文件搜索路径：roothide 开发套件、theos 头文件与 L360Confetti。
+-HEADER_SEARCH_PATHS = $(inherited) $(DEVKIT) $(THEOS)/vendor/include $(THEOS)/include $(SRCROOT)/ThirdParty/L360Confetti/iOS
+-
+-// 链接搜索路径：优先使用当前方案的 theos 库，再回退到通用库和开发套件 tbd。
+-FRAMEWORK_SEARCH_PATHS = $(inherited) $(THEOS)/vendor/lib/iphone/$(POP_SCHEME) $(THEOS)/vendor/lib
+-LIBRARY_SEARCH_PATHS = $(inherited) $(THEOS)/vendor/lib/iphone/$(POP_SCHEME) $(DEVKIT)/roothide $(THEOS)/vendor/lib
++HEADER_SEARCH_PATHS = $(inherited) $(THEOS)/vendor/include $(THEOS)/include $(SRCROOT)/ThirdParty/L360Confetti/iOS
++FRAMEWORK_SEARCH_PATHS = $(inherited) $(THEOS)/vendor/lib/iphone $(THEOS)/vendor/lib
++LIBRARY_SEARCH_PATHS = $(inherited) $(THEOS)/vendor/lib/iphone $(THEOS)/vendor/lib
+ 
+-// 默认使用 RootHide；其他方案由 build.sh 选择明确的路径实现。
+-POP_SCHEME_DEFS = THEOS_PACKAGE_SCHEME_ROOTHIDE=1
++POP_SCHEME_DEFS = POP_PACKAGE_SCHEME_ROOTLESS=1
+ GCC_PREPROCESSOR_DEFINITIONS = $(inherited) $(POP_SCHEME_DEFS)
+ 
+-// 注入代码在运行时解析私有框架符号（SpringBoard、Preferences 等）。
+-// roothide 的 libroothide 仅由主 Tweak 链接，它注入 SpringBoard 后可确保 .jbroot 软链接存在；
+-// 偏好设置包由“设置”加载，不能依赖该库。
++// Private iOS framework symbols are resolved by the jailbreak loader.
+ OTHER_LDFLAGS = $(inherited) -undefined dynamic_lookup
+ 
+-// 发布构建设置：不生成调试符号，并移除未使用或非全局的符号以减小安装包体积。
+-// 注入式 dylib 通过间接符号表解析私有 API，因此保留全局符号并使用 non-global。
+ GCC_GENERATE_DEBUGGING_SYMBOLS = NO
+ GCC_SYMBOLS_PRIVATE_EXTERN = YES
+ DEPLOYMENT_POSTPROCESSING = YES
+diff --git a/PullOverX/POApplicationHelper.m b/PullOverX/POApplicationHelper.m
+index c5345cf..fef542c 100644
+--- a/PullOverX/POApplicationHelper.m
++++ b/PullOverX/POApplicationHelper.m
+@@ -120,7 +120,7 @@ static id POSharedObjectForClass(Class cls) {
+ 
+ +(NSUserDefaults *)settingsDefaults{
+     // 用 cfprefsd 域（纯标识符，由系统定位物理位置），tweak 与设置 App 读写同一域。
+-    // 不写死任何路径 -> rootful/rootless/roothide 三方案通用，roothide 随机 jbroot 也由 cfprefsd 处理。
++    // 不写死任何路径，标准 rootless 环境由系统和偏好设置域处理。
+     return [[NSUserDefaults alloc] initWithSuiteName:@"com.mlgm.pulloverx"];
+ }
+ +(NSMutableDictionary *)settings{
+diff --git a/PullOverX/PullOverX.mm b/PullOverX/PullOverX.mm
+index c24559a..8de0578 100644
+--- a/PullOverX/PullOverX.mm
++++ b/PullOverX/PullOverX.mm
+@@ -6,8 +6,6 @@
+ #import <objc/runtime.h>
+ #include <substrate.h>
+ 
+-#import <roothide.h>
+-
+ #import "headers.h"
+ #import "FBSOrientationObserver.h"
+ #import "FBSOrientationUpdate.h"
+diff --git a/PullOverXPreferences/Package/DEBIAN/control b/PullOverXPreferences/Package/DEBIAN/control
+index 85244ef..8da8b09 100644
+--- a/PullOverXPreferences/Package/DEBIAN/control
++++ b/PullOverXPreferences/Package/DEBIAN/control
+@@ -7,7 +7,7 @@ Depends: firmware (>= 5.0), mobilesubstrate, preferenceloader
+ Conflicts: 
+ Replaces: 
+ Priority: optional
+-Architecture: iphoneos-arm
++Architecture: iphoneos-arm64
+ Author: mlgm
+ dev: 
+ Homepage: 
+diff --git a/README.md b/README.md
+index c1eadfc..55f3b36 100644
+--- a/README.md
++++ b/README.md
+@@ -1,11 +1,69 @@
+-# PullOver X
++# PullOver X（rootless）
+ 
+ PullOver X is maintained by **mlgm** and based on PullOver Pro by Will Smillie
+-(`c1d3rDev`). It mainly adds landscape support and UI refinements.
++(`c1d3rDev`). This fork is configured for standard **rootless** jailbreaks
++such as Dopamine/Fugu15 on arm64/arm64e devices.
++
++## 本仓库改动
++
++- 移除 RootHide `libroothide`、RootHide devkit 和 `@import <roothide.h>` 依赖。
++- 使用标准 rootless 包路径：所有文件安装到 `/var/jb/...`。
++- Debian 架构改为 `iphoneos-arm64`；二进制编译 `arm64 arm64e`。
++- `build.sh` 默认并且只接受 `rootless`，同时构建并打包 tweak 与偏好设置。
++- GitHub Actions 自动安装 Theos、iOS SDK、ldid、dpkg，并上传 `.deb` artifact。
++
++## GitHub Actions 编译操作指南
++
++### 1. Fork 项目
++
++1. 打开本项目 GitHub 页面，点击右上角 **Fork**。
++2. 选择自己的 GitHub 账号，建议保留仓库名称 `pulloverx-aspect`。
++3. 进入 Fork 后打开 **Settings → Actions → General**，确认允许运行 Actions。
++
++### 2. 启动编译
++
++把修改推送到 Fork 的 `main` 分支会自动编译；也可以手动执行：
++
++1. 打开 Fork 仓库的 **Actions**。
++2. 选择 **Build PullOver X (rootless)**。
++3. 点击 **Run workflow → Run workflow**。
++4. 等待 job 完成，在页面底部 **Artifacts** 下载 `pulloverx-rootless-deb`。
++
++### 3. 安装到 Dopamine/rootless 设备
++
++将下载的 `.deb` 传到设备后，在终端执行：
++
++```sh
++dpkg -i com.mlgm.pulloverx_*_iphoneos-arm64.deb
++# 或者使用 Sileo/Zebra/安装器打开该 deb
++```
++
++安装后执行一次 userspace reboot/respring。该包依赖
++`mobilesubstrate` 和 `preferenceloader`，请先确认对应 rootless 版本已经安装。
++
++## 本地编译
++
++需要 macOS、Xcode、Theos、ldid 和 dpkg：
++
++```sh
++export THEOS=/opt/theos
++./build.sh rootless release
++# 输出：packages/com.mlgm.pulloverx_1.96_iphoneos-arm64.deb
++```
++
++调试包：
++
++```sh
++./build.sh rootless debug
++```
++
++## 常见问题
++
++- **没有生成 artifact**：打开 Actions 的失败步骤，优先检查 Xcode/SDK 下载或 Theos 依赖。
++- **安装后设置里没有条目**：确认 `preferenceloader` 已安装，并执行 respring。
++- **设备提示架构不匹配**：确认下载的是 `iphoneos-arm64` 包，而不是旧的 arm64e/roothide 包。
++- **不要在 rootless 设备上安装旧 roothide 包**：RootHide 与标准 rootless 的路径、链接方式不同。
+ 
+ ## License
+ 
+-PullOver X is distributed under the [GNU General Public License v3.0](LICENSE).
+-Third-party components remain under their respective licenses, including the
+-RootHide Xcode devkit ([source](roothide-devkit/SOURCE.md)) and L360Confetti
+-([Apache License 2.0](ThirdParty/L360Confetti/iOS/LICENSE.md)).
++GNU General Public License v3.0。第三方组件仍以其各自许可证为准。
+diff --git a/build.sh b/build.sh
+index 5afb635..f66bf35 100755
+--- a/build.sh
++++ b/build.sh
+@@ -6,18 +6,16 @@
+ # this script assembles and builds the .deb for the requested jailbreak scheme.
+ #
+ # Usage:
+-#   ./build.sh [roothide|rootless|rootful] [debug|release]
++#   ./build.sh [rootless] [debug|release]
+ #
+-# Schemes:
+-#   roothide  -> RootHide devkit + libroothide (dynamic jbroot)
+-#   rootless  -> Theos libroot (standard rootless path resolution)
+-#   rootful   -> canonical rootful paths
++# The package is staged below /var/jb, as required by standard
++# rootless jailbreaks such as Dopamine/Fugu15.
+ #
+ set -euo pipefail
+ 
+ cd "$(dirname "$0")"
+ 
+-SCHEME="${1:-roothide}"
++SCHEME="${1:-rootless}"
+ CONFIG_ARG="${2:-release}"
+ 
+ case "$CONFIG_ARG" in
+@@ -26,49 +24,19 @@ case "$CONFIG_ARG" in
+ 	*) echo "error: unknown configuration '$CONFIG_ARG' (use debug|release)"; exit 1 ;;
+ esac
+ 
+-# ---- Per-scheme settings -----------------------------------------------------
+-POP_ROOTHIDE_LDFLAGS="-lroothide"
++# ---- Rootless settings -------------------------------------------------------
++PREFIX="/var/jb"
++DEB_ARCH="iphoneos-arm64"
++ARCHS="arm64 arm64e"
++POP_ROOTHIDE_LDFLAGS=""
+ POP_ROOTLESS_LDFLAGS=""
+-POP_SCHEME_DEFS="THEOS_PACKAGE_SCHEME_ROOTHIDE=1"
+-POP_RPATHS=""
+-ARCHS="arm64e"
+-
+-# Jailbreak environment <-> deb architecture / install prefix mapping:
+-#   rootful  -> deb iphoneos-arm    prefix /        (absolute install names)
+-#   rootless -> deb iphoneos-arm64  prefix /var/jb  (@rpath install names)
+-#   roothide -> deb iphoneos-arm64e prefix /        (randomized jbroot, @loader_path/.jbroot)
+-# NB: "arm/arm64/arm64e" here are the dpkg Architecture labels, not CPU archs.
+-#     Binaries are built fat (arm64+arm64e) where possible so the preference
+-#     bundle loads regardless of whether the host process runs as arm64 or arm64e.
+-case "$SCHEME" in
+-	roothide)
+-		PREFIX=""
+-		DEB_ARCH="iphoneos-arm64e"
+-		ARCHS="arm64 arm64e"
+-		;;
+-	rootless)
+-		PREFIX="/var/jb"
+-		DEB_ARCH="iphoneos-arm64"
+-		ARCHS="arm64 arm64e"
+-		POP_ROOTHIDE_LDFLAGS=""
+-		POP_ROOTLESS_LDFLAGS="-lroot"
+-		POP_SCHEME_DEFS="ROOTHIDE_USE_STUB=1 POP_PACKAGE_SCHEME_ROOTLESS=1"
+-		# Rootless v2 supports both the conventional and relocated jbroot rpaths.
+-		POP_RPATHS="/var/jb/usr/lib /var/jb/Library/Frameworks @loader_path/.jbroot/usr/lib @loader_path/.jbroot/Library/Frameworks"
+-		;;
+-	rootful)
+-		PREFIX=""
+-		DEB_ARCH="iphoneos-arm"
+-		ARCHS="arm64"
+-		POP_ROOTHIDE_LDFLAGS=""
+-		POP_SCHEME_DEFS="ROOTHIDE_USE_STUB=1 POP_PACKAGE_SCHEME_ROOTFUL=1"
+-		POP_RPATHS="/usr/lib /Library/Frameworks"
+-		;;
+-	*)
+-		echo "error: unknown scheme '$SCHEME' (use roothide|rootless|rootful)"
+-		exit 1
+-		;;
+-esac
++POP_SCHEME_DEFS="POP_PACKAGE_SCHEME_ROOTLESS=1"
++POP_RPATHS="/var/jb/usr/lib /var/jb/Library/Frameworks"
++
++if [ "$SCHEME" != "rootless" ]; then
++	echo "error: this fork only supports the rootless scheme"
++	exit 1
++fi
+ 
+ echo "==> Building PullOver X  [scheme=$SCHEME  config=$CONFIGURATION  arch=$ARCHS  deb=$DEB_ARCH]"
+ 
+diff --git a/libsubstrate-roothide.tbd b/libsubstrate-roothide.tbd
+deleted file mode 100644
+index 6753e5b..0000000
+--- a/libsubstrate-roothide.tbd
++++ /dev/null
+@@ -1,19 +0,0 @@
+---- !tapi-tbd
+-tbd-version:     4
+-targets:         [ arm64-ios, arm64e-ios ]
+-uuids:
+-  - target:          arm64-ios
+-    value:           00000000-0000-0000-0000-000000000001
+-  - target:          arm64e-ios
+-    value:           00000000-0000-0000-0000-000000000002
+-flags:           [ not_app_extension_safe ]
+-install-name:    '@loader_path/.jbroot/usr/lib/libsubstrate.dylib'
+-current-version: 0.0.0
+-compatibility-version: 0.0.0
+-exports:
+-  - targets:         [ arm64-ios, arm64e-ios ]
+-    symbols:         [ _MSCloseImage, _MSDebug, _MSFindAddress, _MSFindSymbol,
+-                       _MSGetImageByName, _MSHookClassPair, _MSHookFunction,
+-                       _MSHookMemory, _MSHookMessageEx, _MSImageAddress,
+-                       _MSMapImage ]
+-...
+diff --git a/roothide-devkit/SOURCE.md b/roothide-devkit/SOURCE.md
+deleted file mode 100644
+index bfac7b9..0000000
+--- a/roothide-devkit/SOURCE.md
++++ /dev/null
+@@ -1,10 +0,0 @@
+-# RootHide Xcode devkit
+-
+-These files are copied from the official `roothide/libroothide` Xcode devkit release `0.0.1`:
+-
+-- Release: https://github.com/roothide/libroothide/releases/tag/0.0.1
+-- Asset: https://github.com/RootHide/libroothide/files/12643716/devkit.zip
+-- License: MIT, https://github.com/roothide/libroothide/blob/main/LICENSE
+-- `devkit.zip` SHA-256: `295ce6b7e411aad38738c2965789eb10c7ed244567b9b86b539e226fa6a3dac5`
+-
+-Do not edit the vendored headers or TBD locally. Update them by replacing the complete devkit from an official RootHide release.
+diff --git a/roothide-devkit/roothide.h b/roothide-devkit/roothide.h
+deleted file mode 100644
+index 2ff8540..0000000
+--- a/roothide-devkit/roothide.h
++++ /dev/null
+@@ -1,7 +0,0 @@
+-#if defined(ROOTHIDE_USE_STUB) && defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+-#error "ROOTHIDE_USE_STUB defined, but THEOS_PACKAGE_SCHEME=roothide"
+-#elif defined(ROOTHIDE_USE_STUB) && !defined(THEOS_PACKAGE_SCHEME_ROOTHIDE)
+-#include "roothide/stub.h"
+-#else
+-#include "roothide/roothide.h"
+-#endif
+diff --git a/roothide-devkit/roothide/libroothide.tbd b/roothide-devkit/roothide/libroothide.tbd
+deleted file mode 100644
+index 672728e..0000000
+--- a/roothide-devkit/roothide/libroothide.tbd
++++ /dev/null
+@@ -1,19 +0,0 @@
+---- !tapi-tbd
+-tbd-version:     4
+-targets:         [ arm64-ios, arm64e-ios ]
+-uuids:
+-  - target:          arm64-ios
+-    value:           F3D9D859-0E30-37E9-9DE5-2EA9B478A187
+-  - target:          arm64e-ios
+-    value:           F7D1DA7D-02AA-3442-A68C-7F7B4EA02D22
+-flags:           [ not_app_extension_safe ]
+-install-name:    '@loader_path/.jbroot/usr/lib/libroothide.dylib'
+-current-version: 0
+-compatibility-version: 0
+-exports:
+-  - targets:         [ arm64-ios, arm64e-ios ]
+-    symbols:         [ __Z6jbrootNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEE,
+-                       __Z6jbrootP8NSString, __Z6rootfsNSt3__112basic_stringIcNS_11char_traitsIcEENS_9allocatorIcEEEE,
+-                       __Z6rootfsP8NSString, _jbrand, _jbroot, _jbroot_alloc, _jbrootat_alloc,
+-                       _rootfs, _rootfs_alloc ]
+-...
+diff --git a/roothide-devkit/roothide/module.modulemap b/roothide-devkit/roothide/module.modulemap
+deleted file mode 100644
+index a934106..0000000
+--- a/roothide-devkit/roothide/module.modulemap
++++ /dev/null
+@@ -1,7 +0,0 @@
+-module roothide {
+-  header "roothide.h"
+-
+-  link "roothide"
+-
+-  export *
+-}
+diff --git a/roothide-devkit/roothide/roothide.h b/roothide-devkit/roothide/roothide.h
+deleted file mode 100644
+index 166f830..0000000
+--- a/roothide-devkit/roothide/roothide.h
++++ /dev/null
+@@ -1,52 +0,0 @@
+-#ifndef ROOTHIDE_H
+-#define ROOTHIDE_H
+-
+-#pragma GCC diagnostic push
+-#pragma GCC diagnostic ignored "-Wnullability-completeness"
+-
+-#include <string.h>
+-
+-#ifdef __cplusplus
+-#include <string>
+-#endif
+-
+-#ifdef __OBJC__
+-#import <Foundation/NSString.h>
+-#endif
+-
+-#ifdef __cplusplus
+-extern "C" {
+-#endif
+-
+-const char* rootfs_alloc(const char* path);  /* free after use */
+-const char* jbroot_alloc(const char* path); /* free after use */
+-const char* jbrootat_alloc(int fd, const char* path); /* free after use */
+-
+-//
+-
+-/* get the system-wide random value of current jailbreak state */
+-unsigned long long jbrand();
+-
+-/* convert jbroot-based path to rootfs-based path (auto cache) */
+-const char* jbroot(const char* path);
+-
+-/* convert rootfs-based path to jbroot-based path (auto cache) */
+-const char* rootfs(const char* path);
+-
+-#ifdef __OBJC__
+-NSString* _Nonnull __attribute__((overloadable)) jbroot(NSString* _Nonnull path);
+-NSString* _Nonnull __attribute__((overloadable)) rootfs(NSString* _Nonnull path);
+-#endif
+-
+-#ifdef __cplusplus
+-}
+-#endif
+-
+-#ifdef __cplusplus
+-std::string jbroot(std::string path);
+-std::string rootfs(std::string path);
+-#endif
+-
+-#pragma GCC diagnostic pop
+-
+-#endif /* ROOTHIDE_H */
+diff --git a/roothide-devkit/roothide/stub.h b/roothide-devkit/roothide/stub.h
+deleted file mode 100644
+index 1c3c03d..0000000
+--- a/roothide-devkit/roothide/stub.h
++++ /dev/null
+@@ -1,50 +0,0 @@
+-#ifndef ROOTHIDE_H
+-#define ROOTHIDE_H
+-
+-#pragma message("roothide disabled, using stub functions...")
+-
+-#pragma GCC diagnostic push
+-#pragma GCC diagnostic ignored "-Wunused-function"
+-#pragma GCC diagnostic ignored "-Wnullability-completeness"
+-
+-#include <string.h>
+-
+-#ifdef __cplusplus
+-#include <string>
+-#endif
+-
+-#ifdef __OBJC__
+-#import <Foundation/NSString.h>
+-#endif
+-
+-//stub functions
+-
+-#ifdef __cplusplus
+-extern "C" {
+-#endif
+-
+-static const char* rootfs_alloc(const char* path) { return path ? strdup(path) : path; }
+-static const char* jbroot_alloc(const char* path) { return path ? strdup(path) : path; }
+-static const char* jbrootat_alloc(int fd, const char* path) { return path ? strdup(path) : path; }
+-
+-static unsigned long long jbrand() { return 0; }
+-static const char* jbroot(const char* path) { return path; }
+-static const char* rootfs(const char* path) { return path; }
+-
+-#ifdef __OBJC__
+-static NSString* _Nonnull __attribute__((overloadable)) jbroot(NSString* _Nonnull path) { return path; }
+-static NSString* _Nonnull __attribute__((overloadable)) rootfs(NSString* _Nonnull path) { return path; }
+-#endif
+-
+-#ifdef __cplusplus
+-}
+-#endif
+-
+-#ifdef __cplusplus
+-static std::string jbroot(std::string path) { return path; }
+-static std::string rootfs(std::string path) { return path; }
+-#endif
+-
+-#pragma GCC diagnostic pop
+-
+-#endif /* ROOTHIDE_H */
+-- 
+2.47.3
+

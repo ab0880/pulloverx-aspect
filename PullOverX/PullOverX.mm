@@ -6,8 +6,6 @@
 #import <objc/runtime.h>
 #include <substrate.h>
 
-#import <roothide.h>
-
 #import "headers.h"
 #import "FBSOrientationObserver.h"
 #import "FBSOrientationUpdate.h"

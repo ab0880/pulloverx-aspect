@@ -6,18 +6,16 @@
 # this script assembles and builds the .deb for the requested jailbreak scheme.
 #
 # Usage:
-#   ./build.sh [roothide|rootless|rootful] [debug|release]
+#   ./build.sh [rootless] [debug|release]
 #
-# Schemes:
-#   roothide  -> RootHide devkit + libroothide (dynamic jbroot)
-#   rootless  -> Theos libroot (standard rootless path resolution)
-#   rootful   -> canonical rootful paths
+# The package is staged below /var/jb, as required by standard
+# rootless jailbreaks such as Dopamine/Fugu15.
 #
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-SCHEME="${1:-roothide}"
+SCHEME="${1:-rootless}"
 CONFIG_ARG="${2:-release}"
 
 case "$CONFIG_ARG" in
@@ -26,49 +24,19 @@ case "$CONFIG_ARG" in
 	*) echo "error: unknown configuration '$CONFIG_ARG' (use debug|release)"; exit 1 ;;
 esac
 
-# ---- Per-scheme settings -----------------------------------------------------
-POP_ROOTHIDE_LDFLAGS="-lroothide"
+# ---- Rootless settings -------------------------------------------------------
+PREFIX="/var/jb"
+DEB_ARCH="iphoneos-arm64"
+ARCHS="arm64 arm64e"
+POP_ROOTHIDE_LDFLAGS=""
 POP_ROOTLESS_LDFLAGS=""
-POP_SCHEME_DEFS="THEOS_PACKAGE_SCHEME_ROOTHIDE=1"
-POP_RPATHS=""
-ARCHS="arm64e"
+POP_SCHEME_DEFS="POP_PACKAGE_SCHEME_ROOTLESS=1"
+POP_RPATHS="/var/jb/usr/lib /var/jb/Library/Frameworks"
 
-# Jailbreak environment <-> deb architecture / install prefix mapping:
-#   rootful  -> deb iphoneos-arm    prefix /        (absolute install names)
-#   rootless -> deb iphoneos-arm64  prefix /var/jb  (@rpath install names)
-#   roothide -> deb iphoneos-arm64e prefix /        (randomized jbroot, @loader_path/.jbroot)
-# NB: "arm/arm64/arm64e" here are the dpkg Architecture labels, not CPU archs.
-#     Binaries are built fat (arm64+arm64e) where possible so the preference
-#     bundle loads regardless of whether the host process runs as arm64 or arm64e.
-case "$SCHEME" in
-	roothide)
-		PREFIX=""
-		DEB_ARCH="iphoneos-arm64e"
-		ARCHS="arm64 arm64e"
-		;;
-	rootless)
-		PREFIX="/var/jb"
-		DEB_ARCH="iphoneos-arm64"
-		ARCHS="arm64 arm64e"
-		POP_ROOTHIDE_LDFLAGS=""
-		POP_ROOTLESS_LDFLAGS="-lroot"
-		POP_SCHEME_DEFS="ROOTHIDE_USE_STUB=1 POP_PACKAGE_SCHEME_ROOTLESS=1"
-		# Rootless v2 supports both the conventional and relocated jbroot rpaths.
-		POP_RPATHS="/var/jb/usr/lib /var/jb/Library/Frameworks @loader_path/.jbroot/usr/lib @loader_path/.jbroot/Library/Frameworks"
-		;;
-	rootful)
-		PREFIX=""
-		DEB_ARCH="iphoneos-arm"
-		ARCHS="arm64"
-		POP_ROOTHIDE_LDFLAGS=""
-		POP_SCHEME_DEFS="ROOTHIDE_USE_STUB=1 POP_PACKAGE_SCHEME_ROOTFUL=1"
-		POP_RPATHS="/usr/lib /Library/Frameworks"
-		;;
-	*)
-		echo "error: unknown scheme '$SCHEME' (use roothide|rootless|rootful)"
-		exit 1
-		;;
-esac
+if [ "$SCHEME" != "rootless" ]; then
+	echo "error: this fork only supports the rootless scheme"
+	exit 1
+fi
 
 echo "==> Building PullOver X  [scheme=$SCHEME  config=$CONFIGURATION  arch=$ARCHS  deb=$DEB_ARCH]"
 

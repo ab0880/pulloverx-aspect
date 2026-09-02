@@ -120,7 +120,7 @@ static id POSharedObjectForClass(Class cls) {
 
 +(NSUserDefaults *)settingsDefaults{
     // 用 cfprefsd 域（纯标识符，由系统定位物理位置），tweak 与设置 App 读写同一域。
-    // 不写死任何路径 -> rootful/rootless/roothide 三方案通用，roothide 随机 jbroot 也由 cfprefsd 处理。
+    // 不写死任何路径，标准 rootless 环境由系统和偏好设置域处理。
     return [[NSUserDefaults alloc] initWithSuiteName:@"com.mlgm.pulloverx"];
 }
 +(NSMutableDictionary *)settings{
