@@ -1,0 +1,38 @@
+diff --git a/PullOverX/PullOverViewController.m b/PullOverX/PullOverViewController.m
+index f28baa8..3106b33 100644
+--- a/PullOverX/PullOverViewController.m
++++ b/PullOverX/PullOverViewController.m
+@@ -244,15 +244,25 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
+     [keyboardZoomContainer addSubview:shadowView];
+ 
+     [keyboardZoomContainer addSubview:self.contentView];
++    // handleScrollView must remain above the card container. The container is
++    // inserted after the handle rail and otherwise covers the edge handle when
++    // it becomes visible during the first layout/open cycle.
++    [scrollView bringSubviewToFront:handleScrollView];
+     
+-    if ([[NSUserDefaults standardUserDefaults] stringForKey:@"lastPinnedBundleId"]) {
+-        pinnedBundleId = [[NSUserDefaults standardUserDefaults] stringForKey:@"lastPinnedBundleId"];
+-        UIImage *image = [POApplicationHelper imageForBundleId:pinnedBundleId];
+-        self.handle.imageView.image = image;
+-    }else{
+-        pinnedBundleId = @"com.apple.MobileSMS";
+-        UIImage *image = [POApplicationHelper imageForBundleId:pinnedBundleId];
+-        self.handle.imageView.image = image;
++    NSString *initialPinnedBundleId = [[NSUserDefaults standardUserDefaults] stringForKey:@"lastPinnedBundleId"];
++    pinnedBundleId = initialPinnedBundleId.length > 0 ? initialPinnedBundleId : @"com.apple.MobileSMS";
++    self.handle.imageView.image = [POApplicationHelper imageForBundleId:pinnedBundleId];
++    // IconServices may not be ready when SpringBoard first creates the window.
++    // Retry without clearing the handle itself, so the handle remains visible
++    // even if the icon arrives a little later.
++    for (NSNumber *delay in @[@0.15, @0.5, @1.5, @3.0]) {
++        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
++                                      (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
++                       dispatch_get_main_queue(), ^{
++            if (self->pinnedBundleId.length > 0 && !self.handle.imageView.image) {
++                self.handle.imageView.image = [POApplicationHelper imageForBundleId:self->pinnedBundleId];
++            }
++        });
+     }
+     
+     [[ContextHostManager sharedInstance] setSceneDelegate:self];

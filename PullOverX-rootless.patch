@@ -1,4 +1,4 @@
-From 418ea36114d6e3cd17fd06ff6fb1451a33262c89 Mon Sep 17 00:00:00 2001
+From e29a81d776b908a4c38152c1782690eb24778b5e Mon Sep 17 00:00:00 2001
 From: Minis <minis@localhost>
 Date: Wed, 2 Sep 2026 19:04:45 +0800
 Subject: [PATCH] Convert project to standard rootless GitHub Actions build
@@ -8,6 +8,7 @@ Subject: [PATCH] Convert project to standard rootless GitHub Actions build
  POPPath.h                                   | 22 +++----
  PullOverX.xcconfig                          | 33 +++-------
  PullOverX/POApplicationHelper.m             |  2 +-
+ PullOverX/PullOverViewController.m          | 26 +++++---
  PullOverX/PullOverX.mm                      |  2 -
  PullOverXPreferences/Package/DEBIAN/control |  2 +-
  README.md                                   | 70 +++++++++++++++++++--
@@ -19,7 +20,7 @@ Subject: [PATCH] Convert project to standard rootless GitHub Actions build
  roothide-devkit/roothide/module.modulemap   |  7 ---
  roothide-devkit/roothide/roothide.h         | 52 ---------------
  roothide-devkit/roothide/stub.h             | 50 ---------------
- 15 files changed, 126 insertions(+), 292 deletions(-)
+ 16 files changed, 144 insertions(+), 300 deletions(-)
  delete mode 100644 libsubstrate-roothide.tbd
  delete mode 100644 roothide-devkit/SOURCE.md
  delete mode 100644 roothide-devkit/roothide.h
@@ -232,6 +233,44 @@ index c5345cf..fef542c 100644
      return [[NSUserDefaults alloc] initWithSuiteName:@"com.mlgm.pulloverx"];
  }
  +(NSMutableDictionary *)settings{
+diff --git a/PullOverX/PullOverViewController.m b/PullOverX/PullOverViewController.m
+index f28baa8..3106b33 100644
+--- a/PullOverX/PullOverViewController.m
++++ b/PullOverX/PullOverViewController.m
+@@ -244,15 +244,25 @@ typedef NS_ENUM(NSInteger, POKeyboardNotificationState) {
+     [keyboardZoomContainer addSubview:shadowView];
+ 
+     [keyboardZoomContainer addSubview:self.contentView];
++    // handleScrollView must remain above the card container. The container is
++    // inserted after the handle rail and otherwise covers the edge handle when
++    // it becomes visible during the first layout/open cycle.
++    [scrollView bringSubviewToFront:handleScrollView];
+     
+-    if ([[NSUserDefaults standardUserDefaults] stringForKey:@"lastPinnedBundleId"]) {
+-        pinnedBundleId = [[NSUserDefaults standardUserDefaults] stringForKey:@"lastPinnedBundleId"];
+-        UIImage *image = [POApplicationHelper imageForBundleId:pinnedBundleId];
+-        self.handle.imageView.image = image;
+-    }else{
+-        pinnedBundleId = @"com.apple.MobileSMS";
+-        UIImage *image = [POApplicationHelper imageForBundleId:pinnedBundleId];
+-        self.handle.imageView.image = image;
++    NSString *initialPinnedBundleId = [[NSUserDefaults standardUserDefaults] stringForKey:@"lastPinnedBundleId"];
++    pinnedBundleId = initialPinnedBundleId.length > 0 ? initialPinnedBundleId : @"com.apple.MobileSMS";
++    self.handle.imageView.image = [POApplicationHelper imageForBundleId:pinnedBundleId];
++    // IconServices may not be ready when SpringBoard first creates the window.
++    // Retry without clearing the handle itself, so the handle remains visible
++    // even if the icon arrives a little later.
++    for (NSNumber *delay in @[@0.15, @0.5, @1.5, @3.0]) {
++        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
++                                      (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
++                       dispatch_get_main_queue(), ^{
++            if (self->pinnedBundleId.length > 0 && !self.handle.imageView.image) {
++                self.handle.imageView.image = [POApplicationHelper imageForBundleId:self->pinnedBundleId];
++            }
++        });
+     }
+     
+     [[ContextHostManager sharedInstance] setSceneDelegate:self];
 diff --git a/PullOverX/PullOverX.mm b/PullOverX/PullOverX.mm
 index c24559a..8de0578 100644
 --- a/PullOverX/PullOverX.mm
